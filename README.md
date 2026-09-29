@@ -1,8 +1,12 @@
 # Audio Transcriber API
 
+[![CI](https://github.com/amanullah18/audio-transcriber/actions/workflows/ci.yml/badge.svg)](https://github.com/amanullah18/audio-transcriber/actions/workflows/ci.yml)
+[![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+
 An asynchronous speech-to-text service. You upload an audio file (voice notes, meetings, podcasts) and get back a job ID. A background worker transcribes the audio with [faster-whisper](https://github.com/SYSTRAN/faster-whisper), and you fetch the transcript with timestamps once it's ready.
 
-It runs entirely on your own machine on CPU. No audio is sent to a third-party API.
+Transcription runs on your own machine on CPU, so no audio is sent to a third-party API.
 
 **Stack:** FastAPI · PostgreSQL · Redis + RQ · SQLAlchemy 2 · faster-whisper · Docker Compose · pytest · GitHub Actions
 
@@ -27,10 +31,12 @@ It runs entirely on your own machine on CPU. No audio is sent to a third-party A
 ## Features
 
 - **Async job processing.** Jobs move through `queued → processing → completed | failed`.
-- **Retries with backoff, only when useful.** Temporary failures are retried up to 2 times (after 10s, then 60s). Permanent ones, like corrupt audio, fail straight away, because retrying would give the same result. The attempt count and last error are stored on the job.
-- **Timeouts.** Each job has a hard time limit (`JOB_TIMEOUT_SECONDS`), so a stuck job can't hold a worker forever.
+- **API-key authentication.** Every job endpoint requires an `X-API-Key` header, and each key only sees the jobs it created. Another client's job returns `404`, so job ids can't be probed. Keys are stored only as hashes on jobs. The API refuses to start without a key, or with the placeholder from `.env.example`.
+- **Retries with backoff, only when useful.** Temporary failures are retried up to 2 times (after 10s, then 60s). Permanent ones fail straight away, because retrying would give the same result: corrupt audio, invalid parameters, and timeouts (audio too long for the limit would just time out again). The attempt count and last error are stored on the job.
+- **Timeouts everywhere.** Each job has a hard time limit (`JOB_TIMEOUT_SECONDS`). Redis and Postgres connections have short timeouts, so a hung dependency makes requests fail fast with `503` instead of hanging.
+- **Crash recovery.** If a worker dies mid-job (crash, OOM kill, redeploy), the job would stay `processing` forever, because the timeout is enforced by the worker that died. The API runs a background check (see [app/reaper.py](app/reaper.py)) that finds such jobs once they've outlived their timeout plus a grace period, then re-queues them, or fails them if they have no retries left. It also re-enqueues `queued` jobs whose queue entry was lost, e.g. after a Redis restart. Workers claim jobs with an atomic `UPDATE ... WHERE status = 'queued'`, so a job delivered twice is never transcribed twice. A job stuck this way can also be deleted.
 - **Upload validation.** Only allowed file extensions are accepted. Uploads are streamed to disk in chunks and rejected with `413` as soon as they pass the size limit, so the whole file is never held in memory.
-- **Privacy by default.** Uploaded audio is deleted once a job completes or finally fails.
+- **Data minimisation.** Uploaded audio is deleted once a job completes or finally fails. Transcripts stay in Postgres until the client deletes them.
 - **Model caching.** The worker loads each Whisper model once and reuses it across jobs, instead of loading hundreds of MB per request.
 - **Graceful degradation.** If Redis is down, uploads return `503` rather than leaving jobs stranded, and `/health` reports each dependency separately.
 - **100 languages by name.** Pass `language=urdu` (or the ISO code `ur`), or leave it out to auto-detect. Unsupported languages are rejected with `422` before any work is queued.
@@ -42,18 +48,21 @@ Requires Docker.
 ```bash
 git clone https://github.com/amanullah18/audio-transcriber.git
 cd audio-transcriber
+cp .env.example .env
+# Edit .env and set API_KEYS to a random secret, e.g. the output of:
+#   python -c "import secrets; print(secrets.token_urlsafe(32))"
 docker compose up -d --build
 ```
 
-Interactive API docs: **http://localhost:8000/docs**
+Interactive API docs: **http://localhost:8000/docs** (click **Authorize** and enter your API key).
 
 ```bash
 # 1. Submit audio
-curl -F "file=@meeting.mp3" -F "model=small" -F "language=english" http://localhost:8000/transcriptions
+curl -H "X-API-Key: $API_KEY" -F "file=@meeting.mp3" -F "model=small" -F "language=english"   http://localhost:8000/transcriptions
 # {"id":"4d03e536-7165-431e-8789-e57dcab579d5","status":"queued"}
 
 # 2. Poll for the result
-curl http://localhost:8000/transcriptions/4d03e536-7165-431e-8789-e57dcab579d5
+curl -H "X-API-Key: $API_KEY" http://localhost:8000/transcriptions/4d03e536-7165-431e-8789-e57dcab579d5
 ```
 
 ```json
@@ -81,6 +90,8 @@ The first job for each model downloads its weights (≈75 MB for `tiny`, ≈500 
 
 ## API
 
+All `/transcriptions` endpoints require the `X-API-Key` header and return `401` without a valid key. `/languages` and `/health` are public.
+
 | Method   | Endpoint                         | Description                                                                 |
 |----------|----------------------------------|-----------------------------------------------------------------------------|
 | `POST`   | `/transcriptions`                | Upload audio (`file`, optional `model`, `language`). Returns `202` + `Location` header. |
@@ -88,7 +99,7 @@ The first job for each model downloads its weights (≈75 MB for `tiny`, ≈500 
 | `GET`    | `/transcriptions`                | List jobs, newest first. Query: `status`, `limit` (≤100), `offset`.         |
 | `GET`    | `/transcriptions/{id}`           | Job status, and the transcript with segments once completed.                |
 | `GET`    | `/transcriptions/{id}/text`      | Plain-text transcript. `409` if not completed yet.                          |
-| `DELETE` | `/transcriptions/{id}`           | Delete the job and its audio. `409` while processing.                       |
+| `DELETE` | `/transcriptions/{id}`           | Delete the job and its audio. `409` while processing, unless the job's worker is gone. |
 | `GET`    | `/health`                        | Database and Redis connectivity. `503` if either is down.                   |
 
 **Models:** `tiny`, `base`, `small` (default), `medium`, `large-v3`. Bigger models are more accurate and slower.
@@ -100,6 +111,7 @@ Set these as environment variables (see [.env.example](.env.example)):
 
 | Variable                        | Default        | Description                                |
 |---------------------------------|----------------|--------------------------------------------|
+| `API_KEYS`                      | *(required)*   | Comma-separated API keys; each key only sees its own jobs |
 | `DATABASE_URL`                  | local Postgres | SQLAlchemy connection URL                  |
 | `REDIS_URL`                     | local Redis    | Queue backend                              |
 | `MAX_UPLOAD_MB`                 | `50`           | Upload size limit                          |
@@ -107,6 +119,14 @@ Set these as environment variables (see [.env.example](.env.example)):
 | `JOB_TIMEOUT_SECONDS`           | `3600`         | Hard limit per job                         |
 | `JOB_MAX_RETRIES`               | `2`            | Retries after the first failed attempt     |
 | `DELETE_AUDIO_AFTER_PROCESSING` | `true`         | Remove uploaded audio when a job finishes  |
+| `STALE_JOB_GRACE_SECONDS`       | `300`          | How long past its timeout a `processing` job may go before it's treated as orphaned |
+| `REAPER_INTERVAL_SECONDS`       | `60`           | How often the API checks for orphaned jobs (`0` disables) |
+
+## Security notes
+
+- This service does not terminate TLS. Put it behind a reverse proxy (nginx, Caddy, a cloud load balancer) with HTTPS, or API keys and audio travel in plain text.
+- API keys are shared secrets configured by environment variable. There's no key management UI or per-key rate limiting yet (see roadmap).
+- The Postgres credentials in `docker-compose.yml` are for local use. Change them for any real deployment.
 
 ## Development
 
@@ -117,7 +137,13 @@ pip install -r requirements-dev.txt
 pytest -v
 ```
 
-The tests use SQLite and replace the Redis queue and Whisper model with fakes, so they run in about a second with no services running. CI runs them on every push, along with a Docker build.
+The Redis queue and Whisper model are replaced with fakes, so the tests run in about a second. Locally they use SQLite by default, so no services are needed. **CI runs them against a real PostgreSQL**, the same engine as production, along with a Docker build. To do the same locally:
+
+```bash
+docker run -d --rm --name test-pg -e POSTGRES_USER=test -e POSTGRES_PASSWORD=test -e POSTGRES_DB=test -p 55432:5432 postgres:17-alpine
+TEST_DATABASE_URL=postgresql+psycopg://test:test@localhost:55432/test pytest -v
+docker stop test-pg
+```
 
 ### CLI (no server needed)
 
@@ -132,7 +158,8 @@ python transcribe.py voice-note.ogg --model small --language en
 ```
 app/
   main.py         FastAPI routes
-  worker.py       Background task: status transitions, retries, cleanup
+  worker.py       Background task: atomic claiming, retries, cleanup
+  reaper.py       Recovery of jobs orphaned by worker crashes or lost queue entries
   transcriber.py  faster-whisper wrapper with model caching
   languages.py    Supported languages (name <-> ISO code)
   queue.py        Redis/RQ setup and job enqueueing
@@ -149,8 +176,12 @@ transcribe.py     Standalone CLI
 
 - Alembic migrations (tables are currently created on startup)
 - Webhook callback when a job finishes, as an alternative to polling
-- API-key authentication and per-client rate limiting
+- Per-client rate limiting and quotas
 - Object storage (S3/MinIO) for uploads, so API and workers don't need a shared volume
-- Detect jobs orphaned by a worker crash and re-queue them
+- Configurable transcript retention (auto-delete after N days)
 - GPU worker image (CUDA) for faster large-model transcription
 - Export as SRT/VTT subtitles
+
+## License
+
+[MIT](LICENSE)
