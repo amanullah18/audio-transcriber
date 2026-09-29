@@ -1,0 +1,72 @@
+x-app-env: &app-env
+  DATABASE_URL: postgresql+psycopg://transcriber:transcriber@postgres:5432/transcriber
+  REDIS_URL: redis://redis:6379/0
+  UPLOAD_DIR: /app/data/uploads
+  DEFAULT_MODEL: ${DEFAULT_MODEL:-small}
+  MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-50}
+  JOB_TIMEOUT_SECONDS: ${JOB_TIMEOUT_SECONDS:-3600}
+  JOB_MAX_RETRIES: ${JOB_MAX_RETRIES:-2}
+  DELETE_AUDIO_AFTER_PROCESSING: ${DELETE_AUDIO_AFTER_PROCESSING:-true}
+
+services:
+  api:
+    image: audio-transcriber:latest
+    build: .
+    ports:
+      - "8000:8000"
+    environment: *app-env
+    volumes:
+      - uploads:/app/data/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  worker:
+    image: audio-transcriber:latest
+    build: .
+    # SimpleWorker runs jobs in-process instead of forking per job, so the loaded Whisper model stays cached in memory.
+    # --with-scheduler is required for delayed retries (Retry intervals) to be re-enqueued.
+    command: ["sh", "-c", "rq worker --url $$REDIS_URL --worker-class rq.worker.SimpleWorker --with-scheduler transcriptions"]
+    environment: *app-env
+    volumes:
+      - uploads:/app/data/uploads
+      - model-cache:/home/app/.cache/huggingface
+    depends_on:
+      api:
+        condition: service_healthy  # the API creates the database tables on startup
+    deploy:
+      replicas: ${WORKER_REPLICAS:-1}
+
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: transcriber
+      POSTGRES_PASSWORD: transcriber
+      POSTGRES_DB: transcriber
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U transcriber"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:8-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  uploads:
+  model-cache:
+  pgdata:

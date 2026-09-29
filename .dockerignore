@@ -1,0 +1,17 @@
+venv/
+.venv/
+.git/
+__pycache__/
+.pytest_cache/
+data/
+transcripts/
+tests/
+.env
+*.ogg
+*.opus
+*.mp3
+*.m4a
+*.wav
+*.flac
+*.webm
+*.mp4

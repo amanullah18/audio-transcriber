@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+venv/
+.venv/
+
+# Local config / secrets
+.env
+
+# Personal data: uploaded audio and generated transcripts
+data/
+transcripts/
+*.ogg
+*.opus
+*.mp3
+*.m4a
+*.wav
+*.flac
+*.webm
+*.mp4
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

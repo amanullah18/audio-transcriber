@@ -1,0 +1,9 @@
+fastapi==0.141.1
+uvicorn[standard]==0.54.0
+python-multipart==0.0.32
+pydantic-settings==2.15.0
+SQLAlchemy==2.1.1
+psycopg[binary]==3.3.6
+redis==8.1.0
+rq==2.12.0
+faster-whisper==1.2.1
