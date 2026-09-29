@@ -3,6 +3,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from rq.timeouts import JobTimeoutException
 
 from app import worker
 from app.models import JobStatus, TranscriptionJob
@@ -13,7 +14,7 @@ from app.transcriber import TranscriptionResult
 def job(db, tmp_path):
     audio = tmp_path / "clip.ogg"
     audio.write_bytes(b"audio")
-    job = TranscriptionJob(original_filename="clip.ogg", audio_path=str(audio), model="tiny")
+    job = TranscriptionJob(owner="owner", original_filename="clip.ogg", audio_path=str(audio), model="tiny")
     db.add(job)
     db.commit()
     return job
@@ -93,6 +94,34 @@ def test_permanent_error_fails_immediately_without_retry(db, job, monkeypatch):
     assert job.attempts == 1
     assert job.error.startswith("ValueError")
     assert job.audio_path is None
+
+
+def test_timeout_fails_immediately_without_retry(db, job, monkeypatch):
+    def too_slow(*_a, **_kw):
+        raise JobTimeoutException("Task exceeded maximum timeout value (3600 seconds)")
+
+    monkeypatch.setattr(worker.transcriber, "transcribe", too_slow)
+    monkeypatch.setattr(worker, "get_current_job", lambda: SimpleNamespace(retries_left=2))
+
+    worker.transcribe_job(str(job.id))
+
+    job = reload(db, job)
+    assert job.status == JobStatus.failed
+    assert job.attempts == 1
+    assert job.error.startswith("JobTimeoutException")
+
+
+def test_duplicate_delivery_is_skipped_while_another_worker_processes(db, job, monkeypatch):
+    job.status = JobStatus.processing
+    job.attempts = 1
+    db.commit()
+    monkeypatch.setattr(worker.transcriber, "transcribe", _boom)  # must not be called
+
+    worker.transcribe_job(str(job.id))
+
+    job = reload(db, job)
+    assert job.status == JobStatus.processing
+    assert job.attempts == 1
 
 
 def test_missing_job_is_skipped(monkeypatch):

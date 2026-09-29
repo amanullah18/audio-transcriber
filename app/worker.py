@@ -2,20 +2,23 @@
 import logging
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
 
 from rq import get_current_job
+from rq.timeouts import JobTimeoutException
+from sqlalchemy import update
 
 from app import transcriber
 from app.config import get_settings
 from app.db import SessionLocal
 from app.models import JobStatus, TranscriptionJob
+from app.storage import delete_job_audio
 
 log = logging.getLogger(__name__)
 
 # Errors that will fail identically on every attempt, so retrying only wastes worker time.
 # ValueError covers invalid parameters and corrupt/unsupported audio (PyAV's InvalidDataError subclasses it).
-PERMANENT_ERRORS = (ValueError, FileNotFoundError)
+# A timeout means the audio is too long for the configured limit, and would just time out again.
+PERMANENT_ERRORS = (ValueError, FileNotFoundError, JobTimeoutException)
 
 
 def _will_retry() -> bool:
@@ -23,28 +26,33 @@ def _will_retry() -> bool:
     return bool(rq_job and rq_job.retries_left)
 
 
-def _cleanup_audio(job: TranscriptionJob) -> None:
-    """Uploaded audio is personal data: drop it once the job reaches a terminal state."""
-    if get_settings().delete_audio_after_processing and job.audio_path:
-        Path(job.audio_path).unlink(missing_ok=True)
-        job.audio_path = None
+def _claim(db, job_id: uuid.UUID) -> bool:
+    """Atomically move a queued job to processing.
+
+    Only one worker can win this, so a job delivered twice (e.g. re-queued by the reaper while RQ also
+    retried it) is never transcribed twice at the same time.
+    """
+    result = db.execute(
+        update(TranscriptionJob)
+        .where(TranscriptionJob.id == job_id, TranscriptionJob.status == JobStatus.queued)
+        .values(
+            status=JobStatus.processing,
+            attempts=TranscriptionJob.attempts + 1,
+            started_at=datetime.now(timezone.utc),
+            error=None,
+        )
+    )
+    db.commit()
+    return result.rowcount == 1
 
 
 def transcribe_job(job_id: str) -> None:
+    settings = get_settings()
     with SessionLocal() as db:
+        if not _claim(db, uuid.UUID(job_id)):
+            log.info("Job %s is not queued (deleted, finished or claimed by another worker), skipping", job_id)
+            return
         job = db.get(TranscriptionJob, uuid.UUID(job_id))
-        if job is None:
-            log.warning("Job %s no longer exists (deleted?), skipping", job_id)
-            return
-        if job.status == JobStatus.completed:
-            log.info("Job %s already completed, skipping", job_id)
-            return
-
-        job.status = JobStatus.processing
-        job.attempts += 1
-        job.started_at = datetime.now(timezone.utc)
-        job.error = None
-        db.commit()
 
         try:
             result = transcriber.transcribe(job.audio_path, job.model, job.requested_language)
@@ -55,7 +63,7 @@ def transcribe_job(job_id: str) -> None:
             job.status = JobStatus.queued if not permanent and _will_retry() else JobStatus.failed
             if job.status == JobStatus.failed:
                 job.finished_at = datetime.now(timezone.utc)
-                _cleanup_audio(job)
+                delete_job_audio(job, settings)
             db.commit()
             if permanent:
                 # RQ has no per-exception retry policy, so swallow the error to stop it retrying.
@@ -70,6 +78,6 @@ def transcribe_job(job_id: str) -> None:
         job.text = result.text
         job.status = JobStatus.completed
         job.finished_at = datetime.now(timezone.utc)
-        _cleanup_audio(job)
+        delete_job_audio(job, settings)
         db.commit()
         log.info("Job %s completed (%d segments)", job_id, len(result.segments))

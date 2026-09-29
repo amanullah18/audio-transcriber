@@ -27,6 +27,9 @@ class TranscriptionJob(Base):
         Enum(JobStatus, name="job_status"), default=JobStatus.queued, index=True
     )
 
+    owner: Mapped[str] = mapped_column(String(64), index=True)  # hash of the API key that created the job
+    rq_job_id: Mapped[str | None] = mapped_column(String(64))  # current RQ job, used to detect lost queue entries
+
     original_filename: Mapped[str] = mapped_column(String(255))
     audio_path: Mapped[str | None] = mapped_column(String(512))
     model: Mapped[str] = mapped_column(String(32))

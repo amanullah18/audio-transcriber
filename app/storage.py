@@ -4,8 +4,16 @@ from pathlib import Path
 from fastapi import HTTPException, UploadFile, status
 
 from app.config import Settings
+from app.models import TranscriptionJob
 
 CHUNK_SIZE = 1024 * 1024
+
+
+def delete_job_audio(job: TranscriptionJob, settings: Settings) -> None:
+    """Uploaded audio is personal data: drop it once the job reaches a terminal state."""
+    if settings.delete_audio_after_processing and job.audio_path:
+        Path(job.audio_path).unlink(missing_ok=True)
+        job.audio_path = None
 
 
 def validate_extension(filename: str, settings: Settings) -> str:

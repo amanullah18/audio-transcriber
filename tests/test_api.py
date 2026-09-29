@@ -1,4 +1,5 @@
 import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from app.main import app, get_enqueuer
@@ -21,6 +22,7 @@ def test_create_transcription_saves_file_and_enqueues(client, enqueued, db):
     assert enqueued == [body["id"]]
 
     job = db.get(TranscriptionJob, uuid.UUID(body["id"]))
+    assert job.rq_job_id == f"rq-{body['id']}"
     assert job.model == "tiny"
     assert job.requested_language == "hi"
     assert Path(job.audio_path).read_bytes() == b"fake-ogg-bytes"
@@ -144,6 +146,17 @@ def test_cannot_delete_while_processing(client, db):
     job_id = upload(client).json()["id"]
     job = db.get(TranscriptionJob, uuid.UUID(job_id))
     job.status = JobStatus.processing
+    job.started_at = datetime.now(timezone.utc)
     db.commit()
 
     assert client.delete(f"/transcriptions/{job_id}").status_code == 409
+
+
+def test_can_delete_job_stuck_processing_after_worker_crash(client, db):
+    job_id = upload(client).json()["id"]
+    job = db.get(TranscriptionJob, uuid.UUID(job_id))
+    job.status = JobStatus.processing
+    job.started_at = datetime.now(timezone.utc) - timedelta(days=1)  # far beyond timeout + grace
+    db.commit()
+
+    assert client.delete(f"/transcriptions/{job_id}").status_code == 204

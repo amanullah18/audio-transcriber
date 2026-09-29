@@ -1,4 +1,6 @@
 x-app-env: &app-env
+  # Required, no default: the stack won't start with a guessable key. Set it in .env (see .env.example).
+  API_KEYS: ${API_KEYS:?Set API_KEYS in .env - copy .env.example to .env and change the key}
   DATABASE_URL: postgresql+psycopg://transcriber:transcriber@postgres:5432/transcriber
   REDIS_URL: redis://redis:6379/0
   UPLOAD_DIR: /app/data/uploads
@@ -7,6 +9,8 @@ x-app-env: &app-env
   JOB_TIMEOUT_SECONDS: ${JOB_TIMEOUT_SECONDS:-3600}
   JOB_MAX_RETRIES: ${JOB_MAX_RETRIES:-2}
   DELETE_AUDIO_AFTER_PROCESSING: ${DELETE_AUDIO_AFTER_PROCESSING:-true}
+  STALE_JOB_GRACE_SECONDS: ${STALE_JOB_GRACE_SECONDS:-300}
+  REAPER_INTERVAL_SECONDS: ${REAPER_INTERVAL_SECONDS:-60}
 
 services:
   api:
