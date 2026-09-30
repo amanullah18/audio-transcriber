@@ -33,6 +33,10 @@ jobs:
           cache: pip
           cache-dependency-path: requirements*.txt
       - run: pip install -r requirements-dev.txt
+      - name: Check migrations (upgrade, match the models, downgrade)
+        env:
+          DATABASE_URL: ${{ env.TEST_DATABASE_URL }}
+        run: alembic upgrade head && alembic check && alembic downgrade base
       - run: pytest -v
 
   docker:
@@ -40,3 +44,32 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: docker build -t audio-transcriber .
+
+  wordpress-plugin:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: wordpress-plugin/audio-transcriber
+    strategy:
+      matrix:
+        php: ["8.0", "8.3"]  # oldest supported and current
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          tools: composer:v2
+          coverage: none
+      - run: composer install --no-interaction --no-progress
+      - run: composer lint
+      - run: composer test
+      - name: Build installable zip
+        if: matrix.php == '8.3'
+        run: |
+          mkdir -p /tmp/dist
+          cd .. && zip -r /tmp/dist/audio-transcriber.zip audio-transcriber             -x "audio-transcriber/vendor/*" "audio-transcriber/tests/*" "audio-transcriber/composer.*"                "audio-transcriber/phpcs.xml.dist" "audio-transcriber/phpunit.xml.dist" "audio-transcriber/.gitignore"
+      - uses: actions/upload-artifact@v4
+        if: matrix.php == '8.3'
+        with:
+          name: audio-transcriber-plugin
+          path: /tmp/dist/audio-transcriber.zip
