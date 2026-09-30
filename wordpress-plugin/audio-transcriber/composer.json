@@ -1,0 +1,34 @@
+{
+	"name": "amanullah18/audio-transcriber-wp",
+	"description": "WordPress plugin for the self-hosted Audio Transcriber API.",
+	"type": "wordpress-plugin",
+	"license": "MIT",
+	"require": {
+		"php": ">=8.0"
+	},
+	"require-dev": {
+		"brain/monkey": "^2.6",
+		"phpunit/phpunit": "^9.6",
+		"wp-coding-standards/wpcs": "^3.1",
+		"phpcompatibility/phpcompatibility-wp": "^2.1",
+		"dealerdirect/phpcodesniffer-composer-installer": "^1.0"
+	},
+	"autoload-dev": {
+		"psr-4": {
+			"AudioTranscriber\\Tests\\": "tests/"
+		}
+	},
+	"scripts": {
+		"lint": "phpcs",
+		"format": "phpcbf",
+		"test": "phpunit"
+	},
+	"config": {
+		"platform": {
+			"php": "8.0.30"
+		},
+		"allow-plugins": {
+			"dealerdirect/phpcodesniffer-composer-installer": true
+		}
+	}
+}

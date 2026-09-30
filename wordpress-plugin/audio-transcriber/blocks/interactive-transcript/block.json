@@ -1,0 +1,32 @@
+{
+	"$schema": "https://schemas.wp.org/trunk/block.json",
+	"apiVersion": 3,
+	"name": "audio-transcriber/interactive-transcript",
+	"version": "1.0.0",
+	"title": "Interactive Transcript",
+	"category": "media",
+	"icon": "format-audio",
+	"description": "An audio or video player with its transcript. Click a timestamp to jump there; the current line is highlighted while playing.",
+	"keywords": [ "transcript", "podcast", "captions", "audio", "accessibility" ],
+	"textdomain": "audio-transcriber",
+	"attributes": {
+		"attachmentId": {
+			"type": "number"
+		}
+	},
+	"supports": {
+		"html": false,
+		"align": [ "wide", "full" ],
+		"color": {
+			"background": true,
+			"text": true
+		},
+		"spacing": {
+			"margin": true,
+			"padding": true
+		}
+	},
+	"editorScript": "file:./index.js",
+	"viewScript": "file:./view.js",
+	"style": "file:./style.css"
+}

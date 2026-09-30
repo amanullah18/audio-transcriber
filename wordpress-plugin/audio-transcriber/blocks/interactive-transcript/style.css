@@ -1,0 +1,46 @@
+.wp-block-audio-transcriber-interactive-transcript audio,
+.wp-block-audio-transcriber-interactive-transcript video {
+	display: block;
+	width: 100%;
+}
+
+.audio-transcriber__segments {
+	position: relative;
+	max-height: 24rem;
+	margin: 1em 0 0;
+	padding: 0;
+	overflow-y: auto;
+	list-style: none;
+}
+
+.audio-transcriber__segment {
+	display: flex;
+	gap: 0.75em;
+	padding: 0.35em 0.5em;
+	border-radius: 4px;
+	line-height: 1.5;
+}
+
+.audio-transcriber__segment.is-active {
+	background: rgba(127, 127, 127, 0.18);
+}
+
+.audio-transcriber__time {
+	flex: none;
+	min-width: 3.5em;
+	padding: 0;
+	border: 0;
+	background: none;
+	color: inherit;
+	font: inherit;
+	font-variant-numeric: tabular-nums;
+	text-align: left;
+	text-decoration: underline;
+	opacity: 0.7;
+	cursor: pointer;
+}
+
+.audio-transcriber__time:hover,
+.audio-transcriber__time:focus-visible {
+	opacity: 1;
+}
