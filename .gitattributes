@@ -1,0 +1,5 @@
+# Always use LF line endings, on every OS (WordPress Coding Standards and the Linux containers expect LF).
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
