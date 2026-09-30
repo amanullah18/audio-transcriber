@@ -7,7 +7,7 @@ from rq import get_current_job
 from rq.timeouts import JobTimeoutException
 from sqlalchemy import update
 
-from app import transcriber
+from app import transcriber, webhooks
 from app.config import get_settings
 from app.db import SessionLocal
 from app.models import JobStatus, TranscriptionJob
@@ -65,6 +65,8 @@ def transcribe_job(job_id: str) -> None:
                 job.finished_at = datetime.now(timezone.utc)
                 delete_job_audio(job, settings)
             db.commit()
+            if job.status == JobStatus.failed:
+                webhooks.notify(job)
             if permanent:
                 # RQ has no per-exception retry policy, so swallow the error to stop it retrying.
                 # The failure is already recorded on the job, which is the source of truth for clients.
@@ -81,3 +83,4 @@ def transcribe_job(job_id: str) -> None:
         delete_job_audio(job, settings)
         db.commit()
         log.info("Job %s completed (%d segments)", job_id, len(result.segments))
+        webhooks.notify(job)

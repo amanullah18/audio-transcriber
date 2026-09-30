@@ -64,6 +64,9 @@ class JobDetail(JobSummary):
     error: str | None
     attempts: int
     started_at: datetime | None
+    callback_url: str | None
+    webhook_delivered_at: datetime | None
+    webhook_error: str | None
 
 
 class JobList(BaseModel):

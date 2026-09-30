@@ -9,19 +9,22 @@ from pathlib import Path
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Response, Security, UploadFile, status
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 from fastapi.security import APIKeyHeader
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
-from app import queue
+from app import queue, subtitles
 from app.config import Settings, get_settings
-from app.db import SessionLocal, get_db, init_db
+from app.db import SessionLocal, get_db
 from app.languages import LANGUAGES, Language
 from app.models import JobStatus, TranscriptionJob
 from app.reaper import is_stale, recover_orphaned_jobs
 from app.schemas import JobCreated, JobDetail, JobList, LanguageInfo, WhisperModelName
 from app.storage import save_upload, validate_extension
+from app.subtitles import SubtitleFormat
+from app.webhooks import InvalidCallbackURL, validate_callback_url
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger(__name__)
@@ -52,7 +55,7 @@ async def lifespan(_: FastAPI):
         raise RuntimeError("API_KEYS is not set. Refusing to start without authentication (see .env.example).")
     if PLACEHOLDER_API_KEY in settings.api_key_list:
         raise RuntimeError(f"API_KEYS still contains the placeholder '{PLACEHOLDER_API_KEY}'. Generate a real key.")
-    init_db()
+    # The schema is managed by Alembic (`alembic upgrade head` runs before the server starts, see Dockerfile).
 
     reaper = None
     if settings.reaper_interval_seconds > 0:
@@ -114,8 +117,22 @@ async def create_transcription(
     language: Annotated[
         Language | None, Form(description="Spoken language, e.g. urdu, hindi, english (ISO codes like `ur` also work). Omit to auto-detect.")
     ] = None,
+    callback_url: Annotated[
+        str | None, Form(max_length=2048, description="Optional URL to POST a signed notification to when the job finishes.")
+    ] = None,
+    callback_secret: Annotated[
+        str | None, Form(min_length=16, max_length=255, description="Secret used to sign webhook deliveries. Required with `callback_url`.")
+    ] = None,
 ):
     suffix = validate_extension(file.filename or "", settings)
+    if callback_url:
+        if not callback_secret:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "callback_secret is required with callback_url")
+        try:
+            # Resolves DNS, so run it off the event loop.
+            await run_in_threadpool(validate_callback_url, callback_url, settings)
+        except InvalidCallbackURL as exc:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from None
     job_id = uuid.uuid4()
     audio_path = await save_upload(file, job_id, suffix, settings)
 
@@ -126,6 +143,8 @@ async def create_transcription(
         audio_path=str(audio_path),
         model=model.value if model else settings.default_model,
         requested_language=language.code if language else None,
+        callback_url=callback_url or None,
+        callback_secret=callback_secret if callback_url else None,
     )
     db.add(job)
     db.commit()
@@ -175,6 +194,26 @@ def get_transcription_text(job_id: uuid.UUID, db: DbSession, owner: Owner):
     if job.status != JobStatus.completed:
         raise HTTPException(status.HTTP_409_CONFLICT, f"Transcript not ready (status: {job.status.value})")
     return Response(job.text or "", media_type="text/plain; charset=utf-8")
+
+
+@app.get(
+    "/transcriptions/{job_id}/subtitles",
+    response_class=Response,
+    responses={200: {"content": {"text/vtt": {}, "application/x-subrip": {}}}},
+)
+def get_transcription_subtitles(
+    job_id: uuid.UUID, db: DbSession, owner: Owner, format: SubtitleFormat = SubtitleFormat.vtt
+):
+    """Transcript as WebVTT (for HTML5 `<track>` captions) or SRT subtitles."""
+    job = _get_job_or_404(db, job_id, owner)
+    if job.status != JobStatus.completed:
+        raise HTTPException(status.HTTP_409_CONFLICT, f"Transcript not ready (status: {job.status.value})")
+    filename = f"{Path(job.original_filename).stem or job.id}.{format.value}"
+    return Response(
+        subtitles.render(job.segments or [], format),
+        media_type=subtitles.MEDIA_TYPES[format],
+        headers={"Content-Disposition": f'inline; filename="{filename}"'},
+    )
 
 
 @app.delete("/transcriptions/{job_id}", status_code=status.HTTP_204_NO_CONTENT)

@@ -16,7 +16,11 @@ RUN useradd --create-home --uid 1000 app \
     && chown -R app:app /app /home/app/.cache
 USER app
 
+COPY --chown=app:app alembic.ini ./
+COPY --chown=app:app alembic ./alembic
 COPY --chown=app:app app ./app
 
 EXPOSE 8000
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Apply database migrations, then start the API. (Run with more than one API replica? Move the migration
+# into a one-off job so replicas don't race.)
+CMD ["sh", "-c", "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000"]

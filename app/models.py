@@ -44,6 +44,12 @@ class TranscriptionJob(Base):
     error: Mapped[str | None] = mapped_column(Text)
     attempts: Mapped[int] = mapped_column(Integer, default=0)
 
+    # Optional completion webhook. The secret is chosen by the client and used to sign deliveries.
+    callback_url: Mapped[str | None] = mapped_column(String(2048))
+    callback_secret: Mapped[str | None] = mapped_column(String(255))
+    webhook_delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    webhook_error: Mapped[str | None] = mapped_column(Text)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, index=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

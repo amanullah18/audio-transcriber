@@ -11,6 +11,22 @@ x-app-env: &app-env
   DELETE_AUDIO_AFTER_PROCESSING: ${DELETE_AUDIO_AFTER_PROCESSING:-true}
   STALE_JOB_GRACE_SECONDS: ${STALE_JOB_GRACE_SECONDS:-300}
   REAPER_INTERVAL_SECONDS: ${REAPER_INTERVAL_SECONDS:-60}
+  # Set to true when using the `wordpress` profile, so the API may call WordPress on the Docker network.
+  ALLOW_PRIVATE_CALLBACKS: ${ALLOW_PRIVATE_CALLBACKS:-false}
+
+# Local WordPress for developing the plugin: docker compose --profile wordpress up -d
+x-wordpress-env: &wordpress-env
+  WORDPRESS_DB_HOST: wordpress-db
+  WORDPRESS_DB_USER: wordpress
+  WORDPRESS_DB_PASSWORD: wordpress
+  WORDPRESS_DB_NAME: wordpress
+  # Uses the first API key unless WORDPRESS_API_KEY is set.
+  AUDIO_TRANSCRIBER_API_KEY: ${WORDPRESS_API_KEY:-${API_KEYS}}
+  WORDPRESS_CONFIG_EXTRA: |
+    define( 'AUDIO_TRANSCRIBER_API_URL', 'http://api:8000' );
+    define( 'AUDIO_TRANSCRIBER_API_KEY', explode( ',', (string) getenv( 'AUDIO_TRANSCRIBER_API_KEY' ) )[0] );
+    // The API reaches WordPress by its service name, not localhost:8080. ?rest_route= works with any permalink setting.
+    define( 'AUDIO_TRANSCRIBER_CALLBACK_URL', 'http://wordpress/?rest_route=/audio-transcriber/v1/webhook' );
 
 services:
   api:
@@ -37,14 +53,15 @@ services:
     build: .
     # SimpleWorker runs jobs in-process instead of forking per job, so the loaded Whisper model stays cached in memory.
     # --with-scheduler is required for delayed retries (Retry intervals) to be re-enqueued.
-    command: ["sh", "-c", "rq worker --url $$REDIS_URL --worker-class rq.worker.SimpleWorker --with-scheduler transcriptions"]
+    # Queues are listed in priority order: quick webhook deliveries go before transcriptions.
+    command: ["sh", "-c", "rq worker --url $$REDIS_URL --worker-class rq.worker.SimpleWorker --with-scheduler webhooks transcriptions"]
     environment: *app-env
     volumes:
       - uploads:/app/data/uploads
       - model-cache:/home/app/.cache/huggingface
     depends_on:
       api:
-        condition: service_healthy  # the API creates the database tables on startup
+        condition: service_healthy  # the API runs database migrations on startup
     deploy:
       replicas: ${WORKER_REPLICAS:-1}
 
@@ -70,7 +87,53 @@ services:
       timeout: 5s
       retries: 10
 
+  wordpress:
+    image: wordpress:6-php8.3-apache
+    profiles: [wordpress]
+    ports:
+      - "8080:80"
+    environment: *wordpress-env
+    volumes:
+      - wordpress:/var/www/html
+      - ./wordpress-plugin/audio-transcriber:/var/www/html/wp-content/plugins/audio-transcriber
+    depends_on:
+      wordpress-db:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+
+  wordpress-db:
+    image: mariadb:11
+    profiles: [wordpress]
+    environment:
+      MARIADB_DATABASE: wordpress
+      MARIADB_USER: wordpress
+      MARIADB_PASSWORD: wordpress
+      MARIADB_RANDOM_ROOT_PASSWORD: "1"
+    volumes:
+      - wordpress-db:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # WP-CLI, run on demand once the wordpress profile is up: docker compose run --rm wpcli <command>
+  # (Its own profile, so `up` doesn't start it; `run` enables it automatically.)
+  wpcli:
+    image: wordpress:cli-php8.3
+    profiles: [wpcli]
+    user: "33:33"  # www-data, same as the wordpress container, so file ownership matches
+    environment: *wordpress-env
+    volumes:
+      - wordpress:/var/www/html
+      - ./wordpress-plugin/audio-transcriber:/var/www/html/wp-content/plugins/audio-transcriber
+    entrypoint: ["wp"]
+    command: ["--info"]
+
 volumes:
   uploads:
   model-cache:
   pgdata:
+  wordpress:
+  wordpress-db:

@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.models import JobStatus, TranscriptionJob
+from app import webhooks
 from app.storage import delete_job_audio
 
 log = logging.getLogger(__name__)
@@ -78,6 +79,7 @@ def recover_orphaned_jobs(
             job.finished_at = now
             delete_job_audio(job, settings)
             db.commit()
+            webhooks.notify(job)
             recovered += 1
         elif _requeue(db, job, enqueue):
             log.warning("Job %s lost its worker, re-queued (attempt %d so far)", job.id, job.attempts)

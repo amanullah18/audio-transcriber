@@ -43,6 +43,17 @@ def enqueue_transcription(job_id: str) -> str:
     return rq_job.id
 
 
+def enqueue_webhook(job_id: str) -> None:
+    settings = get_settings()
+    # A separate queue, listed first by the worker, so notifications aren't stuck behind a backlog of transcriptions.
+    Queue(settings.webhook_queue_name, connection=get_redis()).enqueue(
+        "app.webhooks.deliver_webhook",
+        job_id,
+        job_timeout=60,
+        retry=Retry(max=5, interval=[10, 30, 120, 600, 1800]),
+    )
+
+
 def is_pending(rq_job_id: str) -> bool:
     """True if RQ still intends to run this job (waiting, scheduled for retry, or running)."""
     try:

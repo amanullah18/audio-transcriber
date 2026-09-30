@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     redis_connect_timeout_seconds: float = 2
     redis_socket_timeout_seconds: float = 5
     queue_name: str = "transcriptions"
+    webhook_queue_name: str = "webhooks"
 
     upload_dir: Path = Path("data/uploads")
     max_upload_mb: int = 50
@@ -32,6 +33,11 @@ class Settings(BaseSettings):
     stale_job_grace_seconds: int = 300
     # How often the API scans for orphaned jobs. 0 disables the scan.
     reaper_interval_seconds: int = 60
+
+    # Webhooks. Callbacks to private/loopback addresses are blocked (SSRF protection) unless explicitly
+    # allowed, e.g. for local development where WordPress runs in the same Docker network.
+    allow_private_callbacks: bool = False
+    webhook_timeout_seconds: float = 10
 
     @property
     def api_key_list(self) -> list[str]:
