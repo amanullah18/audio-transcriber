@@ -26,7 +26,7 @@ jobs:
     env:
       TEST_DATABASE_URL: postgresql+psycopg://test:test@localhost:5432/test
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -42,7 +42,7 @@ jobs:
   docker:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: docker build -t audio-transcriber .
 
   wordpress-plugin:
