@@ -8,7 +8,7 @@ An asynchronous speech-to-text service. You upload an audio file (voice notes, m
 
 Transcription runs on your own machine on CPU, so no audio is sent to a third-party API.
 
-**Stack:** FastAPI · PostgreSQL · Redis + RQ · SQLAlchemy 2 · faster-whisper · Docker Compose · pytest · GitHub Actions
+**Stack:** FastAPI · PostgreSQL · Redis + RQ · SQLAlchemy 2 + Alembic · faster-whisper · Docker Compose · pytest · GitHub Actions. Includes a **[WordPress plugin](#wordpress-plugin)** (PHP).
 
 ## Architecture
 
@@ -39,6 +39,9 @@ Transcription runs on your own machine on CPU, so no audio is sent to a third-pa
 - **Data minimisation.** Uploaded audio is deleted once a job completes or finally fails. Transcripts stay in Postgres until the client deletes them.
 - **Model caching.** The worker loads each Whisper model once and reuses it across jobs, instead of loading hundreds of MB per request.
 - **Graceful degradation.** If Redis is down, uploads return `503` rather than leaving jobs stranded, and `/health` reports each dependency separately.
+- **Signed webhooks.** Pass `callback_url` + `callback_secret` and the API POSTs `{event, id, status}` when the job finishes, signed with HMAC-SHA256 over `timestamp.body` (`X-Transcriber-Signature`, `X-Transcriber-Timestamp`). Deliveries are separate jobs with their own retries (10s → 30 min), so a client being down never re-runs a transcription. Callback URLs pointing at private, loopback or cloud-metadata addresses are rejected (SSRF protection), both when the job is created and at delivery time, and redirects aren't followed.
+- **Subtitles.** `GET /transcriptions/{id}/subtitles?format=vtt|srt` for HTML5 captions or video editors.
+- **Schema migrations** with Alembic, applied automatically when the API container starts. CI checks that migrations upgrade, match the models exactly, and downgrade.
 - **100 languages by name.** Pass `language=urdu` (or the ISO code `ur`), or leave it out to auto-detect. Unsupported languages are rejected with `422` before any work is queued.
 
 ## Quick start
@@ -99,6 +102,7 @@ All `/transcriptions` endpoints require the `X-API-Key` header and return `401` 
 | `GET`    | `/transcriptions`                | List jobs, newest first. Query: `status`, `limit` (≤100), `offset`.         |
 | `GET`    | `/transcriptions/{id}`           | Job status, and the transcript with segments once completed.                |
 | `GET`    | `/transcriptions/{id}/text`      | Plain-text transcript. `409` if not completed yet.                          |
+| `GET`    | `/transcriptions/{id}/subtitles` | WebVTT (default) or SRT (`?format=srt`) subtitles. `409` if not completed yet. |
 | `DELETE` | `/transcriptions/{id}`           | Delete the job and its audio. `409` while processing, unless the job's worker is gone. |
 | `GET`    | `/health`                        | Database and Redis connectivity. `503` if either is down.                   |
 
@@ -121,6 +125,8 @@ Set these as environment variables (see [.env.example](.env.example)):
 | `DELETE_AUDIO_AFTER_PROCESSING` | `true`         | Remove uploaded audio when a job finishes  |
 | `STALE_JOB_GRACE_SECONDS`       | `300`          | How long past its timeout a `processing` job may go before it's treated as orphaned |
 | `REAPER_INTERVAL_SECONDS`       | `60`           | How often the API checks for orphaned jobs (`0` disables) |
+| `ALLOW_PRIVATE_CALLBACKS`       | `false`        | Allow webhooks to private/loopback addresses. Only for local development |
+| `WEBHOOK_TIMEOUT_SECONDS`       | `10`           | Timeout for each webhook delivery          |
 
 ## Security notes
 
@@ -136,6 +142,10 @@ source venv/bin/activate          # Windows: venv\Scripts\activate
 pip install -r requirements-dev.txt
 pytest -v
 ```
+
+The database schema is managed by Alembic. The API container runs `alembic upgrade head` on start; when running the API outside Docker, run it yourself. After changing `app/models.py`, generate a migration with `alembic revision --autogenerate -m "describe the change"` and review it.
+
+> **Upgrading from a version before migrations existed:** the old database has no migration history, so reset it once with `docker compose down -v` (this deletes existing jobs).
 
 The Redis queue and Whisper model are replaced with fakes, so the tests run in about a second. Locally they use SQLite by default, so no services are needed. **CI runs them against a real PostgreSQL**, the same engine as production, along with a Docker build. To do the same locally:
 
@@ -168,19 +178,43 @@ app/
   schemas.py      Pydantic request/response schemas
   config.py       Environment-based settings
   db.py           Engine and session management
-tests/            API and worker tests
+  webhooks.py     Callback URL validation (SSRF) and signed webhook delivery
+  subtitles.py    WebVTT / SRT rendering
+alembic/          Database migrations
+tests/            API, worker, reaper, webhook and subtitle tests
 transcribe.py     Standalone CLI
+wordpress-plugin/ WordPress plugin (PHP), see below
 ```
+
+## WordPress plugin
+
+[`wordpress-plugin/audio-transcriber`](wordpress-plugin/audio-transcriber) lets any WordPress site use your self-hosted API. WordPress runs PHP, usually on shared hosting, and can't run Whisper itself, so the plugin is a thin client: it uploads media to your API and stores the results.
+
+- **Media Library:** a *Transcribe* button on audio/video files, a bulk action, a status column, and optional auto-transcribe on upload.
+- **Interactive Transcript block** (and `[audio_transcript id="123"]` shortcode): a player next to its transcript. Click a timestamp to seek; the current line is highlighted as it plays.
+- **Automatic captions:** a `.vtt` file is generated and added as a `<track>` to core Video blocks.
+- **Instant results by signed webhook**, verified with HMAC and a 5-minute replay window. If the API can't reach the site (e.g. localhost), it falls back to WP-Cron polling automatically.
+- **For developers:** an `audio_transcriber` field on `/wp/v2/media/<id>`; actions `audio_transcriber_submitted|completed|failed`; filters `audio_transcriber_submit_fields|request_args|callback_url`; WP-CLI `wp audio-transcriber check|transcribe|status|sync`.
+
+**Try it locally.** This starts WordPress on http://localhost:8080, wired to the API:
+
+```bash
+# In .env: ALLOW_PRIVATE_CALLBACKS=true (lets the API call WordPress on the Docker network)
+docker compose --profile wordpress up -d --build
+docker compose run --rm wpcli core install --url=http://localhost:8080 --title=Dev   --admin_user=admin --admin_password=admin --admin_email=admin@example.com --skip-email
+docker compose run --rm wpcli plugin activate audio-transcriber
+docker compose run --rm wpcli audio-transcriber check
+```
+
+Then upload audio in **Media > Library** and click **Transcribe**. The plugin has its own tests (PHPUnit + Brain Monkey) and a WordPress Coding Standards check (`composer test`, `composer lint`). CI runs both on PHP 8.0 and 8.3 and builds an installable zip as a workflow artifact. See the plugin's [readme.txt](wordpress-plugin/audio-transcriber/readme.txt) for details.
 
 ## Roadmap
 
-- Alembic migrations (tables are currently created on startup)
-- Webhook callback when a job finishes, as an alternative to polling
 - Per-client rate limiting and quotas
 - Object storage (S3/MinIO) for uploads, so API and workers don't need a shared volume
 - Configurable transcript retention (auto-delete after N days)
 - GPU worker image (CUDA) for faster large-model transcription
-- Export as SRT/VTT subtitles
+- Speaker diarization (who said what)
 
 ## License
 
